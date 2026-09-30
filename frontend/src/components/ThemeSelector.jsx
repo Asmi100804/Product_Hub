@@ -30,7 +30,6 @@ const THEMES = [
   "lemonade",
   "night",
   "coffee",
-  "corporate",
   "dim",
   "nord",
   "sunset",
@@ -39,9 +38,9 @@ const THEMES = [
 function ThemeSelector() {
   const [theme, setTheme] = useState(() => {
     if (typeof window !== "undefined") {
-      return localStorage.getItem("theme") || "corporate";
+      return localStorage.getItem("theme") || "autumn";
     }
-    return "corporate";
+    return "autumn";
   });
 
   useEffect(() => {
