@@ -1,9 +1,10 @@
 import { db } from "./index";
-import { eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql, type SQL } from "drizzle-orm";
 import {
   users,
   comments,
   products,
+  notifications,
   type NewUser,
   type NewComment,
   type NewProduct,
@@ -67,13 +68,9 @@ export const getAllProducts = async () => {
 export const getProductById = async (id: string) => {
   return db.query.products.findFirst({
     where: eq(products.id, id),
-    with: {
-      user: true,
-      comments: {
-        with: { user: true },
-        orderBy: (comments, { desc }) => [desc(comments.createdAt)],
-      },
-    },
+    // comments are no longer loaded here: they are paginated through
+    // GET /api/comments/product/:productId (see getTopLevelComments / getReplies below)
+    with: { user: true },
   });
 };
 
@@ -117,6 +114,7 @@ export const deleteComment = async (id: string) => {
     throw new Error(`Comment with id ${id} not found`);
   }
 
+  // replies are removed by the ON DELETE CASCADE on comments.parent_comment_id
   const [comment] = await db.delete(comments).where(eq(comments.id, id)).returning();
   return comment;
 };
@@ -126,4 +124,176 @@ export const getCommentById = async (id: string) => {
     where: eq(comments.id, id),
     with: { user: true },
   });
+};
+
+export const updateCommentContent = async (id: string, content: string) => {
+  const [comment] = await db
+    .update(comments)
+    .set({ content, editedAt: new Date() })
+    .where(eq(comments.id, id))
+    .returning();
+  return comment;
+};
+
+// shape sent to the client (never leaks the user's email)
+const commentSelection = {
+  id: comments.id,
+  content: comments.content,
+  userId: comments.userId,
+  productId: comments.productId,
+  parentCommentId: comments.parentCommentId,
+  createdAt: comments.createdAt,
+  editedAt: comments.editedAt,
+  user: { id: users.id, name: users.name, imageUrl: users.imageUrl },
+  replyCount: sql<number>`(select count(*)::int from comments r where r.parent_comment_id = ${comments.id})`,
+};
+
+// single comment/reply in the client shape (used after create / edit)
+export const getCommentDTO = async (id: string) => {
+  const [row] = await db
+    .select(commentSelection)
+    .from(comments)
+    .innerJoin(users, eq(comments.userId, users.id))
+    .where(eq(comments.id, id));
+  return row;
+};
+
+// Keyset pagination: the cursor is the id of the last row of the previous page. Comparing the
+// (created_at, id) tuple against that row's own values avoids timestamp precision problems.
+const pageOf = <T extends { id: string }>(rows: T[], limit: number) => {
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  return { items, nextCursor: hasMore ? items[items.length - 1].id : null };
+};
+
+export const getTopLevelComments = async (productId: string, limit: number, cursor?: string) => {
+  const conditions: SQL[] = [eq(comments.productId, productId), isNull(comments.parentCommentId)];
+  if (cursor) {
+    conditions.push(
+      sql`(${comments.createdAt}, ${comments.id}) < (select c.created_at, c.id from comments c where c.id = ${cursor})`
+    );
+  }
+
+  const rows = await db
+    .select(commentSelection)
+    .from(comments)
+    .innerJoin(users, eq(comments.userId, users.id))
+    .where(and(...conditions))
+    .orderBy(desc(comments.createdAt), desc(comments.id))
+    .limit(limit + 1);
+
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(comments)
+    .where(eq(comments.productId, productId));
+
+  const { items, nextCursor } = pageOf(rows, limit);
+  return { comments: items, nextCursor, totalCount: total };
+};
+
+export const getReplies = async (parentCommentId: string, limit: number, cursor?: string) => {
+  const conditions: SQL[] = [eq(comments.parentCommentId, parentCommentId)];
+  if (cursor) {
+    conditions.push(
+      sql`(${comments.createdAt}, ${comments.id}) > (select c.created_at, c.id from comments c where c.id = ${cursor})`
+    );
+  }
+
+  const rows = await db
+    .select(commentSelection)
+    .from(comments)
+    .innerJoin(users, eq(comments.userId, users.id))
+    .where(and(...conditions))
+    .orderBy(asc(comments.createdAt), asc(comments.id))
+    .limit(limit + 1);
+
+  const { items, nextCursor } = pageOf(rows, limit);
+  return { replies: items, nextCursor };
+};
+
+// NOTIFICATIONS
+// One *unread* notification per (recipient, type, thread). More replies to the same thread only
+// bump `count` / `actorId` / `updatedAt` (partial unique index + upsert => race safe).
+export const upsertReplyNotification = async (data: {
+  userId: string;
+  actorId: string;
+  productId: string;
+  parentCommentId: string; // thread root
+  commentId: string; // the new reply
+}) => {
+  const [notification] = await db
+    .insert(notifications)
+    .values({ ...data, type: "comment_reply" })
+    .onConflictDoUpdate({
+      target: [notifications.userId, notifications.type, notifications.parentCommentId],
+      targetWhere: sql`${notifications.readAt} is null`,
+      set: {
+        actorId: data.actorId,
+        commentId: data.commentId,
+        count: sql`${notifications.count} + 1`,
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+  return notification;
+};
+
+const notificationSelection = {
+  id: notifications.id,
+  type: notifications.type,
+  count: notifications.count,
+  readAt: notifications.readAt,
+  createdAt: notifications.createdAt,
+  updatedAt: notifications.updatedAt,
+  productId: notifications.productId,
+  parentCommentId: notifications.parentCommentId,
+  commentId: notifications.commentId,
+  actor: { id: users.id, name: users.name, imageUrl: users.imageUrl },
+  productTitle: products.title,
+};
+
+export const getNotificationDTO = async (id: string) => {
+  const [row] = await db
+    .select(notificationSelection)
+    .from(notifications)
+    .innerJoin(users, eq(notifications.actorId, users.id))
+    .leftJoin(products, eq(notifications.productId, products.id))
+    .where(eq(notifications.id, id));
+  return row;
+};
+
+export const getNotifications = async (userId: string, limit = 20) => {
+  const items = await db
+    .select(notificationSelection)
+    .from(notifications)
+    .innerJoin(users, eq(notifications.actorId, users.id))
+    .leftJoin(products, eq(notifications.productId, products.id))
+    .where(eq(notifications.userId, userId))
+    .orderBy(desc(notifications.updatedAt))
+    .limit(limit);
+  return { notifications: items, unreadCount: await getUnreadNotificationCount(userId) };
+};
+
+export const getUnreadNotificationCount = async (userId: string) => {
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(notifications)
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+  return count;
+};
+
+export const markNotificationRead = async (userId: string, id: string) => {
+  await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(
+      and(eq(notifications.id, id), eq(notifications.userId, userId), isNull(notifications.readAt))
+    );
+};
+
+export const markAllNotificationsRead = async (userId: string) => {
+  await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
 };

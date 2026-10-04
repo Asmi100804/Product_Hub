@@ -19,12 +19,14 @@
     "dotenv": "^17.2.3",
     "drizzle-orm": "^0.44.7",
     "express": "^5.2.1",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/pg": "^8.15.6",
+    "@types/ws": "^8.18.2",
     "drizzle-kit": "^0.31.7",
     "nodemon": "^3.1.11",
     "ts-node": "^10.9.2",

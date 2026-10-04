@@ -1,6 +1,7 @@
 import { ArrowLeftIcon, EditIcon, Trash2Icon, CalendarIcon, UserIcon } from "lucide-react";
 import LoadingSpinner from "../components/LoadingSpinner";
 import CommentsSection from "../components/CommentsSection";
+import MessageButton from "../components/MessageButton";
 import { useAuth } from "@clerk/clerk-react";
 import { useProduct, useDeleteProduct } from "../hooks/useProducts";
 import { useParams, Link, useNavigate } from "react-router";
@@ -108,6 +109,9 @@ function ProductPage() {
                     <p className="text-xs text-base-content/50">Creator</p>
                   </div>
                 </div>
+
+                {/* buyers can message the seller directly (hidden for the seller themselves) */}
+                <MessageButton sellerId={product.userId} />
               </>
             )}
           </div>
@@ -117,7 +121,7 @@ function ProductPage() {
       {/* Comments */}
       <div className="card bg-base-300">
         <div className="card-body">
-          <CommentsSection productId={id} comments={product.comments} currentUserId={userId} />
+          <CommentsSection productId={id} currentUserId={userId} />
         </div>
       </div>
     </div>
